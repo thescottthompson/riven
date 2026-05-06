@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from program.db import db_functions
 from program.db.db import db_session, vacuum_and_analyze_index_maintenance
-from program.media.item import Episode, MediaItem, Movie, Show
+from program.media.item import Episode, MediaItem, Movie, Season, Show
 from program.media.state import States
 from program.scheduling.models import ScheduledStatus, ScheduledTask
 from program.settings import settings_manager
@@ -29,6 +29,44 @@ from schemas.tvdb.models.series_airs_days import SeriesAirsDays
 
 if TYPE_CHECKING:
     from program.program import Program
+
+
+def _add_transient_descendants(
+    session: Session, item: MediaItem
+) -> list[MediaItem]:
+    """Walk a Show/Season tree and explicitly add any transient (PK-less)
+    descendants to the session.
+
+    The save-update cascade on Show.seasons / Season.episodes is supposed to
+    pull in transient children appended to a managed parent's collection,
+    but it doesn't (SQLAlchemy emits "Object of type <Episode> not in
+    session, add operation along 'Season.episodes' will not proceed" and
+    drops them on flush). This walker bypasses that by adding them
+    explicitly so flush can INSERT them as new rows.
+
+    Returns the list of newly-added Season/Episode objects (so callers can
+    flush, then read their assigned IDs).
+    """
+
+    new_children: list[MediaItem] = []
+
+    if isinstance(item, Show):
+        for season in item.seasons:
+            if season.id is None:
+                session.add(season)
+                new_children.append(season)
+
+            for episode in season.episodes:
+                if episode.id is None:
+                    session.add(episode)
+                    new_children.append(episode)
+    elif isinstance(item, Season):
+        for episode in item.episodes:
+            if episode.id is None:
+                session.add(episode)
+                new_children.append(episode)
+
+    return new_children
 
 
 class ScheduledFunctionConfig(TypedDict):
@@ -289,10 +327,74 @@ class ProgramScheduler:
         updated = next(indexer_service.run(item, log_msg=False), None)
 
         if updated:
-            session.merge(updated.media_items[0])
+            updated_item = updated.media_items[0]
+
+            # The TVDB indexer mutates the existing Show in place by appending
+            # transient Season/Episode objects (no PK yet) to managed parents'
+            # collections. The save-update cascade on Season.episodes /
+            # Show.seasons does NOT actually pull these transients into the
+            # session — SQLAlchemy emits "Object of type <Episode> not in
+            # session, add operation along 'Season.episodes' will not proceed"
+            # and silently drops them. Walk the tree and add any transient
+            # children explicitly so they get inserted on flush.
+            new_children = _add_transient_descendants(session, updated_item)
+
+            with session.no_autoflush:
+                session.merge(updated_item)
+
             session.commit()
 
             logger.info(f"Reindexed {item.log_string} from scheduler")
+
+            # Enqueue episodes that still need processing after the reindex.
+            # This covers two cases:
+            #   1. Episodes just discovered by this reindex (still in Unknown
+            #      state, freshly inserted with no streams/files).
+            #   2. Episodes added by a *prior* reindex that never got enqueued
+            #      (e.g. before this fix was deployed — they sit in Unknown
+            #      forever because retry_library only picks up movies/shows).
+            # We deliberately scope to children of THIS show so unrelated
+            # Unknown-state episodes elsewhere aren't churned.
+            #
+            # Calling store_state() before enqueueing transitions newly-added
+            # episodes from "Unknown" → "Indexed" (provided they have title
+            # and aired_at <= now). The state-machine in process_event() only
+            # routes Indexed episodes to the scraper — Unknown is a dead end.
+            now = datetime.now()
+            enqueued = 0
+
+            if isinstance(updated_item, Show):
+                for season in updated_item.seasons:
+                    for episode in season.episodes:
+                        if episode.id is None:
+                            continue
+
+                        if episode.last_state not in (
+                            None,
+                            States.Unknown,
+                            States.Indexed,
+                        ):
+                            continue
+
+                        if episode.aired_at and episode.aired_at > now:
+                            continue
+
+                        # Recompute state (Unknown → Indexed for aired episodes)
+                        episode.store_state()
+
+                        self.program.em.add_event(
+                            Event(emitted_by="Scheduler", item_id=episode.id)
+                        )
+
+                        enqueued += 1
+
+                if enqueued:
+                    session.commit()
+
+            if enqueued:
+                logger.info(
+                    f"Enqueued {enqueued} pending episode(s) from {item.log_string} reindex"
+                )
 
     def _enqueue_item_if_needed(self, session: Session, item: MediaItem) -> None:
         """Refresh state and enqueue item to the event manager if not completed."""

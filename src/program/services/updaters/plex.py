@@ -1,5 +1,7 @@
 """Plex Updater module"""
 
+import time
+
 from kink import di
 from loguru import logger
 from plexapi.exceptions import BadRequest, Unauthorized
@@ -22,7 +24,14 @@ class PlexUpdater(BaseUpdater):
         self._initialize()
 
     def validate(self) -> bool:  # noqa: C901
-        """Validate Plex library"""
+        """Validate Plex library.
+
+        Retries transient connection errors with exponential backoff so that
+        Riven booting just before its Plex container is reachable doesn't
+        permanently disable the updater for the lifetime of the process.
+        Authentication / config errors fail fast — only network-level errors
+        are retried.
+        """
 
         if not self.settings.enabled:
             return False
@@ -39,29 +48,54 @@ class PlexUpdater(BaseUpdater):
             logger.error("Library path is not set!")
             return False
 
-        try:
-            self.api = di[PlexAPI]
-            self.api.validate_server()
-            self.sections = self.api.map_sections_with_paths()
-            self.initialized = True
+        # Retry only transient network failures (e.g. Plex container not yet
+        # reachable on container boot). Each retry roughly doubles the wait.
+        max_attempts = 6
+        delays = [2, 4, 8, 15, 30]
 
-            return True
-        except Unauthorized as e:
-            logger.error(f"Plex is not authorized!: {e}")
-        except TimeoutError as e:
-            logger.exception(f"Plex timeout error: {e}")
-        except BadRequest as e:
-            logger.exception(f"Plex is not configured correctly!: {e}")
-        except MaxRetryError as e:
-            logger.exception(f"Plex max retries exceeded: {e}")
-        except NewConnectionError as e:
-            logger.exception(f"Plex new connection error: {e}")
-        except RequestsConnectionError as e:
-            logger.exception(f"Plex requests connection error: {e}")
-        except RequestError as e:
-            logger.exception(f"Plex request error: {e}")
-        except Exception as e:
-            logger.exception(f"Plex exception thrown: {e}")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.api = di[PlexAPI]
+                self.api.validate_server()
+                self.sections = self.api.map_sections_with_paths()
+                self.initialized = True
+
+                if attempt > 1:
+                    logger.info(
+                        f"Plex validate succeeded on attempt {attempt}/{max_attempts}"
+                    )
+
+                return True
+            except Unauthorized as e:
+                logger.error(f"Plex is not authorized!: {e}")
+                return False
+            except BadRequest as e:
+                logger.exception(f"Plex is not configured correctly!: {e}")
+                return False
+            except (
+                TimeoutError,
+                MaxRetryError,
+                NewConnectionError,
+                RequestsConnectionError,
+                RequestError,
+            ) as e:
+                if attempt < max_attempts:
+                    delay = delays[attempt - 1]
+                    logger.warning(
+                        f"Plex unreachable (attempt {attempt}/{max_attempts}): "
+                        f"{type(e).__name__}: {e}. Retrying in {delay}s."
+                    )
+                    time.sleep(delay)
+                    continue
+
+                logger.exception(
+                    f"Plex unreachable after {max_attempts} attempts: {e}"
+                )
+                return False
+            except Exception as e:
+                logger.exception(f"Plex exception thrown: {e}")
+                return False
+
         return False
 
     def refresh_path(self, path: str) -> bool:
