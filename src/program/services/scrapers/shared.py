@@ -244,8 +244,7 @@ def parse_results(
             if (
                 not manual
                 and torrent.data.year
-                and item.aired_at
-                and not _check_item_year(item.aired_at, torrent.data)
+                and not _check_item_year(item, torrent.data)
             ):
                 # If year is present, then check to make sure it's correct
                 logger.trace(
@@ -293,14 +292,55 @@ def parse_results(
 # helper functions
 
 
-def _check_item_year(aired_at: datetime, data: ParsedData) -> bool:
-    """Check if the year of the torrent is within the range of the item."""
+def _check_item_year(item: MediaItem, data: ParsedData) -> bool:
+    """Check if the year of the torrent is within the range of the item.
 
-    return data.year in [
-        aired_at.year - 1,
-        aired_at.year,
-        aired_at.year + 1,
-    ]
+    For TV series, torrent titles almost always carry the show's premiere year,
+    not the specific season/episode air year. Matching ±1 of an Episode's own
+    aired_at rejects valid torrents for long-running shows (e.g. Malcolm in the
+    Middle, S5 aired 2003 while the show year is 2000). Use the show's full
+    run window instead.
+    """
+
+    if data.year is None:
+        return True
+
+    show: Show | None = None
+    if isinstance(item, (Episode, Season)):
+        show = item.top_parent
+    elif isinstance(item, Show):
+        show = item
+
+    if show is not None:
+        if not show.aired_at:
+            return True
+
+        start_year = show.aired_at.year
+        end_year: int | None = None
+        last_aired = (
+            getattr(show.release_data, "last_aired", None)
+            if show.release_data
+            else None
+        )
+        if last_aired:
+            try:
+                end_year = datetime.strptime(last_aired, "%Y-%m-%d").year
+            except (ValueError, TypeError):
+                end_year = None
+
+        if end_year is None:
+            return data.year >= start_year - 1
+
+        return start_year - 1 <= data.year <= end_year + 1
+
+    if item.aired_at:
+        return data.year in (
+            item.aired_at.year - 1,
+            item.aired_at.year,
+            item.aired_at.year + 1,
+        )
+
+    return True
 
 
 def _get_item_country(item: MediaItem) -> str | None:
