@@ -1272,3 +1272,74 @@ async def overseerr_requests(
             )
 
     return MessageResponse(message="No new overseerr requests to process")
+
+
+@router.post(
+    "/infringing/scan",
+    summary="Scan for items currently using takedown'd torrents and reset them",
+    operation_id="scan_infringing_active_streams",
+    response_model=MessageResponse,
+)
+async def scan_infringing_active_streams() -> MessageResponse:
+    """Find every MediaItem whose active_stream is on the InfringingHash list
+    and reset it so it re-scrapes with the dead hash filtered out.
+
+    Useful when new infringing hashes have been recorded (manually or via
+    automated capture) and you want to immediately replace affected items
+    instead of waiting for the next natural rescrape/playback failure.
+    """
+
+    from program.services.downloaders.infringing import (
+        scan_active_streams_for_infringing,
+    )
+
+    reset_count = scan_active_streams_for_infringing()
+
+    return MessageResponse(
+        message=f"Reset {reset_count} item(s) currently using infringing torrents"
+    )
+
+
+@router.post(
+    "/infringing/record",
+    summary="Mark an infohash as infringing (DMCA takedown'd) and reset any items using it",
+    operation_id="record_infringing_hash",
+    response_model=MessageResponse,
+)
+async def record_infringing_hash_endpoint(
+    infohash: Annotated[
+        str,
+        Body(
+            embed=True,
+            description="40-character lowercase torrent infohash to blacklist",
+        ),
+    ],
+    service: Annotated[
+        str,
+        Body(
+            embed=True,
+            description="Debrid service that flagged this hash (e.g. 'realdebrid')",
+        ),
+    ] = "realdebrid",
+    error: Annotated[
+        str | None,
+        Body(
+            embed=True,
+            description="Optional human-readable reason / error code for the record",
+        ),
+    ] = None,
+) -> MessageResponse:
+    """Manually add an infohash to the global infringing blacklist. Any
+    MediaItem currently using it as its active_stream will be reset so it
+    re-scrapes with this hash filtered out."""
+
+    from program.services.downloaders.infringing import record_infringing_hash
+
+    newly_recorded = record_infringing_hash(infohash, service=service, error=error)
+
+    if newly_recorded:
+        return MessageResponse(
+            message=f"Recorded infringing infohash {infohash} ({service}) and reset affected items"
+        )
+
+    return MessageResponse(message=f"Infohash {infohash} was already on the infringing list")
