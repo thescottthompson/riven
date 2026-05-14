@@ -336,6 +336,17 @@ class Downloader(Runner[None, DownloaderBase]):
 
             return None
 
+        # Avoid a round-trip to add+delete the torrent on the debrid service
+        # when we've already learned the hash is takedown'd; the answer won't
+        # change between cycles.
+        from program.services.downloaders.infringing import is_infringing
+
+        if is_infringing(stream.infohash):
+            logger.debug(
+                f"Stream {stream.infohash} is on the infringing blacklist; skipping {service.key}."
+            )
+            return None
+
         container = service.get_instant_availability(stream.infohash, item.type)
 
         if not container:
