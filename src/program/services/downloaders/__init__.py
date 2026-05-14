@@ -62,6 +62,16 @@ class Downloader(Runner[None, DownloaderBase]):
 
         # Track per-service cooldowns when circuit breaker is open
         self._service_cooldowns = dict[str, datetime]()
+        # Track per-item consecutive cooldown-only reschedules so we can back off
+        # items that get stuck in a tight retry loop while the breaker keeps re-tripping
+        # (e.g. when Real-Debrid is rate-limited from a flood of [451] Infringing
+        # Torrent responses on other items). Each entry maps item.id -> consecutive skips.
+        self._cooldown_skip_counts = dict[int, int]()
+        # After this many consecutive cooldown-only reschedules for the same item,
+        # ignore the (short) breaker cooldown and use a longer backoff instead.
+        self._max_cooldown_skips = 3
+        # Backoff duration applied once an item exceeds _max_cooldown_skips.
+        self._cooldown_skip_backoff = timedelta(minutes=30)
         self.subtitles_enabled = (
             settings_manager.settings.post_processing.subtitle.enabled
         )
@@ -97,15 +107,37 @@ class Downloader(Runner[None, DownloaderBase]):
         ]
 
         if not available_services:
-            # All services are in cooldown, reschedule for the earliest available time
-            next_attempt = min(self._service_cooldowns.values())
-
-            logger.warning(
-                f"All downloader services in cooldown for {item.log_string} ({item.id}), rescheduling for {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
+            # All services are in cooldown. Normally we reschedule for the breaker
+            # cooldown end (~1 min), but if the same item keeps hitting cooldown
+            # without ever getting to actually try its streams, back off harder so
+            # we stop flooding logs and giving the upstream service no chance to
+            # recover.
+            self._cooldown_skip_counts[item.id] = (
+                self._cooldown_skip_counts.get(item.id, 0) + 1
             )
+
+            cooldown_end = min(self._service_cooldowns.values())
+
+            if self._cooldown_skip_counts[item.id] > self._max_cooldown_skips:
+                next_attempt = max(
+                    cooldown_end, datetime.now() + self._cooldown_skip_backoff
+                )
+
+                logger.warning(
+                    f"Downloader cooldown persisted across {self._cooldown_skip_counts[item.id]} attempts for {item.log_string} ({item.id}); extended backoff until {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
+                )
+            else:
+                next_attempt = cooldown_end
+
+                logger.warning(
+                    f"All downloader services in cooldown for {item.log_string} ({item.id}), rescheduling for {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
+                )
 
             yield RunnerResult(media_items=[item], run_at=next_attempt)
             return
+
+        # Item actually gets to attempt downloads this cycle - clear the skip counter.
+        self._cooldown_skip_counts.pop(item.id, None)
 
         download_success = False
 
