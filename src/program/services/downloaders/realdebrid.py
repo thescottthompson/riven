@@ -279,6 +279,14 @@ class RealDebridDownloader(DownloaderBase):
             # add_torrent/select_files/delete_torrent surface HTTP error context via _handle_error
             logger.warning(f"Availability check failed [{infohash}]: {e}")
 
+            if "[451]" in str(e):
+                # Lazy import to avoid circular: infringing -> media -> db -> ...
+                from program.services.downloaders.infringing import (
+                    record_infringing_hash,
+                )
+
+                record_infringing_hash(infohash, self.key, str(e))
+
             if torrent_id:
                 try:
                     self.delete_torrent(torrent_id)
@@ -659,7 +667,14 @@ class RealDebridDownloader(DownloaderBase):
                         f"Link unavailable: {data.error} [error_code: {data.error_code}]"
                     )
 
-                    raise DebridServiceLinkUnavailable(provider=self.key, link=link)
+                    raise DebridServiceLinkUnavailable(
+                        provider=self.key,
+                        link=link,
+                        infringing=(
+                            data.error_code == RealDebridErrorCode.INFRINGING_FILE
+                        ),
+                        error_code=data.error_code,
+                    )
                 else:
                     logger.warning(
                         f"Direct unrestrict failed with status {response.status_code}: {data.error} [{data.error_code}]"

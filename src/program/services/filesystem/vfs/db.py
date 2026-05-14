@@ -152,6 +152,23 @@ class VFSDatabase:
                 # If un-restricting fails, reset the MediaItem to trigger a new download
                 if entry.media_item:
                     item_id = entry.media_item.id
+                    active = entry.media_item.active_stream
+
+                    # If the failure is a DMCA takedown, also record the
+                    # underlying infohash on the global infringing list so
+                    # we don't waste cycles re-attempting the same dead
+                    # torrent on this item OR on any other item that happens
+                    # to share the hash (season packs hit many episodes).
+                    if e.infringing and active and active.infohash:
+                        from program.services.downloaders.infringing import (
+                            record_infringing_hash,
+                        )
+
+                        record_infringing_hash(
+                            active.infohash,
+                            service=e.provider,
+                            error=f"infringing_file (error_code={e.error_code})",
+                        )
 
                     def mutation(i: MediaItem, s: Session):
                         i.blacklist_active_stream()

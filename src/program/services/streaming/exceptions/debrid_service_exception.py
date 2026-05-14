@@ -56,12 +56,26 @@ class DebridServiceServiceUnavailableException(DebridServiceException):
 
 
 class DebridServiceLinkUnavailable(DebridServiceException):
-    """Raised when a link is unavailable on the debrid service."""
+    """Raised when a link is unavailable on the debrid service.
 
-    def __init__(self, provider: str, link: str) -> None:
+    `infringing=True` indicates the debrid service rejected the link as
+    DMCA-takedown'd (e.g. Real-Debrid error_code 35 / "infringing_file").
+    The caller can use this to record the underlying infohash on the
+    global infringing blacklist instead of just retrying.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        link: str,
+        infringing: bool = False,
+        error_code: int | None = None,
+    ) -> None:
         super().__init__(f"Link {link} is unavailable or invalid", provider=provider)
 
         self.link = link
+        self.infringing = infringing
+        self.error_code = error_code
 
 
 class DebridServiceClosedConnectionException(DebridServiceException):
