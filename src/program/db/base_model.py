@@ -18,6 +18,7 @@ def get_base_metadata() -> MetaData:
         StreamRelation,  # pyright: ignore[reportUnusedImport]
         StreamBlacklistRelation,  # pyright: ignore[reportUnusedImport]
         Stream,  # pyright: ignore[reportUnusedImport]
+        InfringingHash,  # pyright: ignore[reportUnusedImport]
     )
     from program.scheduling import (
         ScheduledTask,  # pyright: ignore[reportUnusedImport]

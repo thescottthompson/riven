@@ -8,6 +8,7 @@ from .stream import (
     Stream,
     StreamRelation,
 )
+from .infringing import InfringingHash
 
 __all__ = [
     "Episode",
@@ -22,4 +23,5 @@ __all__ = [
     "StreamRelation",
     "Stream",
     "StreamBlacklistRelation",
+    "InfringingHash",
 ]
