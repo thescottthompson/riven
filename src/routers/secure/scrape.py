@@ -987,6 +987,105 @@ async def session_action(
     raise HTTPException(status_code=400, detail=f"Unknown action: {request.action}")
 
 
+# --- Backwards-compatibility shims for pre-c7c5f5b0 manual-scrape API ---
+# The Jan 2026 refactor folded these standalone POST paths into the unified
+# /session/{session_id} endpoint with an `action` discriminator. Frontends
+# that haven't been redeployed since then still call the old paths, so we
+# keep the old shapes alive as thin forwarders to session_action.
+
+
+@router.post(
+    "/select_files/{session_id}",
+    summary="(deprecated) Select files for a scraping session",
+    operation_id="manual_select_files_legacy",
+    response_model=SelectFilesResponse,
+    include_in_schema=False,
+)
+async def manual_select_files_legacy(
+    background_tasks: BackgroundTasks,
+    session_id: Annotated[
+        str,
+        Path(description="Identifier of the scraping session"),
+    ],
+    files: Annotated[
+        Container,
+        Body(description="The files to select"),
+    ],
+) -> MessageResponse | SelectFilesResponse:
+    return await session_action(
+        background_tasks=background_tasks,
+        session_id=session_id,
+        request=SessionActionRequest(action="select_files", files=files),
+    )
+
+
+@router.post(
+    "/update_attributes/{session_id}",
+    summary="(deprecated) Apply file attributes to a media item",
+    operation_id="manual_update_attributes_legacy",
+    response_model=MessageResponse,
+    include_in_schema=False,
+)
+async def manual_update_attributes_legacy(
+    background_tasks: BackgroundTasks,
+    session_id: Annotated[
+        str,
+        Path(description="Identifier of the scraping session"),
+    ],
+    file_data: Annotated[
+        DebridFile | ShowFileData,
+        Body(description="File attributes to apply"),
+    ],
+) -> MessageResponse | SelectFilesResponse:
+    return await session_action(
+        background_tasks=background_tasks,
+        session_id=session_id,
+        request=SessionActionRequest(action="update_attributes", file_data=file_data),
+    )
+
+
+@router.post(
+    "/abort_session/{session_id}",
+    summary="(deprecated) Abort a scraping session",
+    operation_id="manual_abort_session_legacy",
+    response_model=MessageResponse,
+    include_in_schema=False,
+)
+async def manual_abort_session_legacy(
+    background_tasks: BackgroundTasks,
+    session_id: Annotated[
+        str,
+        Path(description="Identifier of the scraping session"),
+    ],
+) -> MessageResponse | SelectFilesResponse:
+    return await session_action(
+        background_tasks=background_tasks,
+        session_id=session_id,
+        request=SessionActionRequest(action="abort"),
+    )
+
+
+@router.post(
+    "/complete_session/{session_id}",
+    summary="(deprecated) Complete a scraping session",
+    operation_id="manual_complete_session_legacy",
+    response_model=MessageResponse,
+    include_in_schema=False,
+)
+async def manual_complete_session_legacy(
+    background_tasks: BackgroundTasks,
+    session_id: Annotated[
+        str,
+        Path(description="Identifier of the scraping session"),
+    ],
+) -> MessageResponse | SelectFilesResponse:
+    return await session_action(
+        background_tasks=background_tasks,
+        session_id=session_id,
+        request=SessionActionRequest(action="complete"),
+    )
+
+
 class ParseTorrentTitleResponse(BaseModel):
     message: str
     data: list[dict[str, Any]]
