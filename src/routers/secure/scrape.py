@@ -887,12 +887,13 @@ async def session_action(
         with db_session() as session:
             item = resolve_media_item(
                 session=session,
+                item_id=scraping_session.item_id,
                 tmdb_id=scraping_session.tmdb_id,
                 tvdb_id=scraping_session.tvdb_id,
                 imdb_id=scraping_session.imdb_id,
                 media_type=cast(Literal["movie", "tv"] | None, scraping_session.media_type),
             )
-            
+
             if not item:
                 raise HTTPException(status_code=404, detail="Item not found")
             
