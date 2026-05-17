@@ -324,9 +324,16 @@ class Downloader(Runner[None, DownloaderBase]):
         stream: Stream,
         item: MediaItem,
         service: "DownloaderBase",
+        bypass_infringing_check: bool = False,
     ) -> TorrentContainer | None:
         """
         Validate a single stream on a specific service by ensuring its files match the item's requirements.
+
+        bypass_infringing_check: skip the global InfringingHash short-circuit. Used
+        by manual scrape flows where the user has explicitly chosen a specific
+        infohash they want to attempt regardless of past 451s (e.g. RD's takedown
+        filter can be eventually-consistent and a hash that was 451 minutes ago
+        may now be cached).
         """
 
         if item.type == "mediaitem":
@@ -339,13 +346,14 @@ class Downloader(Runner[None, DownloaderBase]):
         # Avoid a round-trip to add+delete the torrent on the debrid service
         # when we've already learned the hash is takedown'd; the answer won't
         # change between cycles.
-        from program.services.downloaders.infringing import is_infringing
+        if not bypass_infringing_check:
+            from program.services.downloaders.infringing import is_infringing
 
-        if is_infringing(stream.infohash):
-            logger.debug(
-                f"Stream {stream.infohash} is on the infringing blacklist; skipping {service.key}."
-            )
-            return None
+            if is_infringing(stream.infohash):
+                logger.debug(
+                    f"Stream {stream.infohash} is on the infringing blacklist; skipping {service.key}."
+                )
+                return None
 
         container = service.get_instant_availability(stream.infohash, item.type)
 
@@ -756,11 +764,16 @@ class Downloader(Runner[None, DownloaderBase]):
             item.streams.append(stream)
             # Session commit is expected to be handled by caller
         
-        # 2. Validate stream and get container (same as standard flow)
+        # 2. Validate stream and get container (same as standard flow).
+        # User explicitly picked this stream via manual scrape, so bypass the
+        # InfringingHash short-circuit: their probe just saw it cached even if
+        # we previously logged a 451 for it (RD's takedown filter can be
+        # eventually-consistent and the live state is the source of truth here).
         container = self.validate_stream_on_service(
-            stream, 
-            item, 
-            service, 
+            stream,
+            item,
+            service,
+            bypass_infringing_check=True,
         )
         
         if not container:
