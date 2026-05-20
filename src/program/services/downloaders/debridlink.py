@@ -221,10 +221,23 @@ class DebridLinkDownloader(DownloaderBase):
 
     def _handle_error(self, response: SmartResponse) -> str:
         """
-        Map HTTP status codes to error messages.
+        Extract the error from a failed Debrid-Link response.
+
+        Debrid-Link returns the specific error code in the JSON body (e.g.
+        ``maxTorrent``, ``maxData``, ``floodDetected``) even on 4xx responses,
+        so prefer that over a generic status-based string — callers rely on it
+        to tell transient account limits apart from permanent failures.
         """
 
         status = response.status_code
+
+        try:
+            body_error = response.json().get("error")
+        except Exception:
+            body_error = None
+
+        if body_error:
+            return str(body_error)
 
         if status == 400:
             return "Bad request"
@@ -239,7 +252,7 @@ class DebridLinkDownloader(DownloaderBase):
         elif status >= 500:
             return "Debrid-Link server error"
         else:
-            return DebridLinkErrorResponse.model_validate(response.json()).error
+            return f"Debrid-Link request failed (HTTP {status})"
 
     def _maybe_backoff(self, response: SmartResponse) -> None:
         """
