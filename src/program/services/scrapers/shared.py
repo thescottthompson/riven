@@ -109,25 +109,11 @@ def parse_results(
 
     logger.debug(f"Processing {len(results)} results for {item.log_string}")
 
-    # Drop infohashes already known to be infringing on the upstream debrid
-    # service. Once a hash is takedown'd it stays dead, so rescraping the same
-    # season pack and re-trying it on every cycle just burns API calls and
-    # blacklist slots.
-    from program.services.downloaders.infringing import get_infringing_set
-
-    infringing_known = get_infringing_set(list(results.keys()))
-
-    if infringing_known:
-        logger.debug(
-            f"Filtered {len(infringing_known)} infringing infohash(es) before parse for {item.log_string}"
-        )
-
+    # Infringing hashes are not filtered here: a hash is only takedown'd for
+    # the specific service that rejected it, so the per-service check in the
+    # downloader's validate_stream_on_service decides eligibility instead.
     for infohash, raw_title in results.items():
         if infohash in processed_infohashes:
-            continue
-
-        if infohash.lower() in infringing_known:
-            processed_infohashes.add(infohash)
             continue
 
         try:

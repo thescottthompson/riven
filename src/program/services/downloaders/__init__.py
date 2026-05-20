@@ -349,9 +349,9 @@ class Downloader(Runner[None, DownloaderBase]):
         if not bypass_infringing_check:
             from program.services.downloaders.infringing import is_infringing
 
-            if is_infringing(stream.infohash):
+            if is_infringing(stream.infohash, service.key):
                 logger.debug(
-                    f"Stream {stream.infohash} is on the infringing blacklist; skipping {service.key}."
+                    f"Stream {stream.infohash} is on the infringing blacklist for {service.key}; skipping."
                 )
                 return None
 

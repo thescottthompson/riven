@@ -257,3 +257,31 @@ def test_record_processing_failure_marks_failed(test_scoped_db_session):
     item = s.query(MediaItem).filter_by(id=item_id).one()
     assert item.failed_attempts == MAX_PROCESSING_FAILURES
     assert item.last_state == States.Failed
+
+
+def test_infringing_blacklist_is_per_service(test_scoped_db_session):
+    """A hash flagged on one service is not skipped on another."""
+    from program.media import InfringingHash
+    from program.services.downloaders.infringing import (
+        is_infringing,
+        record_infringing_hash,
+    )
+
+    infohash = "f" * 40
+
+    record_infringing_hash(infohash, service="realdebrid", error="[451]")
+
+    assert is_infringing(infohash, "realdebrid") is True
+    assert is_infringing(infohash, "alldebrid") is False
+
+    # The composite (infohash, service) PK lets the same hash be flagged
+    # independently for a second service.
+    record_infringing_hash(infohash, service="alldebrid", error="[451]")
+
+    assert is_infringing(infohash, "alldebrid") is True
+    assert (
+        test_scoped_db_session.query(InfringingHash)
+        .filter_by(infohash=infohash)
+        .count()
+        == 2
+    )

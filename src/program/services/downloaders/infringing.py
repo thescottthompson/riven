@@ -2,8 +2,9 @@
 service has flagged as infringing (DMCA-takedown'd).
 
 Two responsibilities:
-- Persist a global blacklist of bad infohashes in the InfringingHash table so
-  every code path (scrape parse, downloader validate, etc.) can skip them.
+- Persist a per-service blacklist of bad infohashes in the InfringingHash
+  table so the downloader can skip a hash on the service that rejected it
+  while still attempting it on other configured services.
 - When a fresh infringing hash is recorded, cascade a reset() onto every
   MediaItem whose active_stream still points at it so those items rescrape
   and pick up a working torrent without manual intervention.
@@ -19,10 +20,14 @@ from program.db.db import db_session
 from program.media import InfringingHash, MediaItem
 
 
-def is_infringing(infohash: str) -> bool:
-    """Return True if the infohash is on the global infringing list."""
+def is_infringing(infohash: str, service: str) -> bool:
+    """Return True if the infohash was flagged infringing for the given service.
 
-    if not infohash:
+    A hash rejected by one debrid service (e.g. a Real-Debrid 451) is not
+    skipped on other services — they may still serve it.
+    """
+
+    if not infohash or not service:
         return False
 
     try:
@@ -30,7 +35,8 @@ def is_infringing(infohash: str) -> bool:
             return (
                 session.execute(
                     select(InfringingHash.infohash).where(
-                        InfringingHash.infohash == infohash.lower()
+                        InfringingHash.infohash == infohash.lower(),
+                        InfringingHash.service == service,
                     )
                 ).first()
                 is not None
@@ -38,28 +44,6 @@ def is_infringing(infohash: str) -> bool:
     except Exception as e:
         logger.debug(f"infringing.is_infringing lookup failed for {infohash}: {e}")
         return False
-
-
-def get_infringing_set(infohashes: list[str]) -> set[str]:
-    """Return the subset of provided infohashes that are on the infringing list."""
-
-    if not infohashes:
-        return set()
-
-    normalized = [h.lower() for h in infohashes if h]
-
-    try:
-        with db_session() as session:
-            rows = session.execute(
-                select(InfringingHash.infohash).where(
-                    InfringingHash.infohash.in_(normalized)
-                )
-            ).all()
-
-            return {row[0] for row in rows}
-    except Exception as e:
-        logger.debug(f"infringing.get_infringing_set lookup failed: {e}")
-        return set()
 
 
 def record_infringing_hash(
@@ -89,7 +73,7 @@ def record_infringing_hash(
                     error=error,
                     recorded_at=datetime.utcnow(),
                 )
-                .on_conflict_do_nothing(index_elements=["infohash"])
+                .on_conflict_do_nothing(index_elements=["infohash", "service"])
                 .returning(InfringingHash.infohash)
             )
             result = session.execute(stmt).first()
