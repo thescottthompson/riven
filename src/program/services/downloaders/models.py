@@ -68,6 +68,14 @@ class BitrateLimitExceededException(InvalidDebridFileException):
     """Exception raised when a file exceeds the allowed bitrate limit"""
 
 
+class DownloaderLimitExceeded(Exception):
+    """Raised when a debrid service rejects a request because an account limit
+    was hit (too many active torrents, daily quota, flood protection).
+
+    This is transient — the same request can succeed once the limit resets — so
+    callers must NOT treat the stream as permanently failed/blacklist it."""
+
+
 class DebridFile(BaseModel):
     """Represents a file from a debrid service"""
 

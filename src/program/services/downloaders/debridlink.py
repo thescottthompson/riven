@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from program.services.downloaders.models import (
     DebridFile,
+    DownloaderLimitExceeded,
     InvalidDebridFileException,
     TorrentContainer,
     TorrentFile,
@@ -85,6 +86,25 @@ class DebridLinkAccountInfo(BaseModel):
 
 class DebridLinkError(Exception):
     """Base exception for Debrid-Link related errors."""
+
+
+def _is_transient_limit_error(message: str) -> bool:
+    """True if a Debrid-Link error represents a transient account limit
+    (quota / too many active torrents / flood protection) rather than a
+    permanent failure of the torrent itself. Debrid-Link returns codes like
+    ``maxLink``, ``maxData``, ``maxTorrent`` and ``floodDetected`` for these."""
+
+    if not message:
+        return False
+
+    m = message.lower()
+
+    return (
+        m.startswith("max")
+        or "flood" in m
+        or "rate limit" in m
+        or "too many" in m
+    )
 
 
 class DebridLinkAPI:
@@ -284,6 +304,16 @@ class DebridLinkDownloader(DownloaderBase):
                     pass
 
             raise
+        except DownloaderLimitExceeded:
+            # Transient account limit — propagate so the downloader cools the
+            # service down and retries the stream later instead of failing it.
+            if torrent_id:
+                try:
+                    self.delete_torrent(torrent_id)
+                except Exception:
+                    pass
+
+            raise
         except DebridLinkError as e:
             logger.warning(f"Availability check failed [{infohash}]: {e}")
 
@@ -398,7 +428,10 @@ class DebridLinkDownloader(DownloaderBase):
         self._maybe_backoff(response)
 
         if not response.ok:
-            raise DebridLinkError(self._handle_error(response))
+            message = self._handle_error(response)
+            if _is_transient_limit_error(message):
+                raise DownloaderLimitExceeded(f"Debrid-Link: {message}")
+            raise DebridLinkError(message)
 
         data = (
             DebridLinkResponse[DebridLinkSeedBoxAddResponse]
@@ -407,6 +440,8 @@ class DebridLinkDownloader(DownloaderBase):
         )
 
         if isinstance(data, DebridLinkErrorResponse):
+            if _is_transient_limit_error(data.error):
+                raise DownloaderLimitExceeded(f"Debrid-Link: {data.error}")
             raise DebridLinkError(data.error)
 
         torrent_id = data.value.id

@@ -17,6 +17,7 @@ from program.media.models import ActiveStream, MediaMetadata
 from program.services.downloaders.models import (
     DebridFile,
     DownloadedTorrent,
+    DownloaderLimitExceeded,
     NoMatchingFilesException,
     NotCachedException,
     TorrentContainer,
@@ -141,8 +142,13 @@ class Downloader(Runner[None, DownloaderBase]):
 
         download_success = False
 
-        # Track if we hit circuit breaker on any service
-        hit_circuit_breaker = False
+        # Track if any service hit a transient failure (circuit breaker or an
+        # account limit) so we don't blacklist streams that just need a retry.
+        hit_transient_failure = False
+
+        # A configured service is already in cooldown and won't get a turn this
+        # pass; streams failing only because of that haven't truly failed.
+        services_pending = len(available_services) < len(self.initialized_services)
 
         try:
             # Sort streams by resolution and rank (highest first) using simple, fast sorting
@@ -153,7 +159,7 @@ class Downloader(Runner[None, DownloaderBase]):
             for stream in sorted_streams:
                 # Try each available service for this stream before blacklisting
                 stream_failed_on_all_services = True
-                stream_hit_circuit_breaker = False
+                stream_hit_transient_failure = False
 
                 for service in available_services:
                     logger.debug(
@@ -199,20 +205,29 @@ class Downloader(Runner[None, DownloaderBase]):
                             )
                     except CircuitBreakerOpen as e:
                         # This specific service hit circuit breaker, set cooldown and try next service
-                        cooldown_duration = timedelta(minutes=1)
                         self._service_cooldowns[service.key] = (
-                            datetime.now() + cooldown_duration
+                            datetime.now() + timedelta(minutes=1)
                         )
                         logger.warning(
                             f"Circuit breaker OPEN for {service.key}, trying next service for stream {stream.infohash}"
                         )
-                        stream_hit_circuit_breaker = True
-                        hit_circuit_breaker = True
-
-                        # If this is the only initialized service, don't mark stream as failed
-                        # We want to retry this stream after cooldown
-                        if len(self.initialized_services) == 1:
-                            stream_failed_on_all_services = False
+                        stream_hit_transient_failure = True
+                        hit_transient_failure = True
+                        continue
+                    except DownloaderLimitExceeded as e:
+                        # An account limit (quota / too many active torrents /
+                        # flood) — transient. Cool the service down longer than
+                        # the breaker so we don't burn quota re-probing it, and
+                        # never blacklist the stream over it.
+                        self._service_cooldowns[service.key] = (
+                            datetime.now() + timedelta(minutes=30)
+                        )
+                        logger.warning(
+                            f"{service.key} account limit reached ({e}); cooling it down 30m, "
+                            f"trying next service for stream {stream.infohash}"
+                        )
+                        stream_hit_transient_failure = True
+                        hit_transient_failure = True
                         continue
 
                     except Exception as e:
@@ -256,15 +271,15 @@ class Downloader(Runner[None, DownloaderBase]):
                     else:
                         break
 
-                # Only blacklist if stream genuinely failed on ALL available services
-                # Don't blacklist if we hit circuit breaker in single-provider mode
+                # Only blacklist if the stream genuinely failed on every
+                # service. A transient failure (circuit breaker / account
+                # limit) this pass, or a service still in cooldown that never
+                # got a turn, means the stream hasn't truly failed everywhere.
                 if stream_failed_on_all_services:
-                    if (
-                        stream_hit_circuit_breaker
-                        and len(self.initialized_services) == 1
-                    ):
+                    if stream_hit_transient_failure or services_pending:
                         logger.debug(
-                            f"Stream {stream.infohash} hit circuit breaker on single provider, will retry after cooldown"
+                            f"Stream {stream.infohash} not blacklisted: a debrid service was "
+                            f"temporarily unavailable (cooldown/limit), will retry after cooldown"
                         )
                     else:
                         logger.debug(
@@ -283,13 +298,19 @@ class Downloader(Runner[None, DownloaderBase]):
             )
 
         if not download_success:
-            # Check if we hit circuit breaker in single-provider mode
-            if hit_circuit_breaker and len(self.initialized_services) == 1:
-                # Reschedule for after cooldown instead of failing
-                next_attempt = min(self._service_cooldowns.values())
+            # If a service was transiently unavailable (circuit breaker /
+            # account limit / still in cooldown), reschedule instead of giving
+            # up — the streams were not genuinely exhausted.
+            now = datetime.now()
+            future_cooldowns = [
+                t for t in self._service_cooldowns.values() if t > now
+            ]
+
+            if (hit_transient_failure or services_pending) and future_cooldowns:
+                next_attempt = min(future_cooldowns)
 
                 logger.warning(
-                    f"Single provider hit circuit breaker for {item.log_string} ({item.id}), rescheduling for {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
+                    f"A debrid service was temporarily unavailable for {item.log_string} ({item.id}), rescheduling for {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
                 )
 
                 yield RunnerResult(media_items=[item], run_at=next_attempt)
