@@ -8,12 +8,17 @@ from RTN import ParsedData, Torrent
 from sqlalchemy import create_engine, text
 from testcontainers.postgres import PostgresContainer
 
+from sqlalchemy.exc import IntegrityError
+
 from program.db.db import db, run_migrations
 from program.db.db_functions import (
+    MAX_PROCESSING_FAILURES,
     get_item_by_external_id,
     item_exists_by_any_id,
+    record_processing_failure,
 )
 from program.media.item import Episode, MediaItem, Movie, Season, Show
+from program.media.state import States
 from program.media.stream import Stream, StreamBlacklistRelation, StreamRelation
 
 
@@ -164,3 +169,91 @@ def test_item_exists_by_any_id_negative(test_scoped_db_session):
         imdb_id=None,
         session=test_scoped_db_session,
     )
+
+
+def test_stream_relation_rejects_duplicate(test_scoped_db_session):
+    """A duplicate (parent_id, child_id) StreamRelation row is rejected.
+
+    Duplicate association rows are what caused the StaleDataError on delete:
+    the unique constraint keeps the relationship collection consistent.
+    """
+    s = test_scoped_db_session
+
+    movie = _movie("40001", "tt40001", title="Dup Stream")
+    stream = Stream(_torrent("Dup.Stream.2020", "a" * 40, "Dup Stream"))
+    movie.streams.append(stream)
+    s.add(movie)
+    s.commit()
+
+    s.add(StreamRelation(parent_id=movie.id, child_id=stream.id))
+
+    with pytest.raises(IntegrityError):
+        s.commit()
+
+    s.rollback()
+
+
+def test_stream_blacklist_relation_rejects_duplicate(test_scoped_db_session):
+    s = test_scoped_db_session
+
+    movie = _movie("40002", "tt40002", title="Dup Blacklist")
+    stream = Stream(_torrent("Dup.Blacklist.2020", "b" * 40, "Dup Blacklist"))
+    movie.blacklisted_streams.append(stream)
+    s.add(movie)
+    s.commit()
+
+    s.add(
+        StreamBlacklistRelation(media_item_id=movie.id, stream_id=stream.id)
+    )
+
+    with pytest.raises(IntegrityError):
+        s.commit()
+
+    s.rollback()
+
+
+def test_stream_removal_commits_cleanly(test_scoped_db_session):
+    """Removing an associated stream deletes exactly one row, no StaleDataError."""
+    s = test_scoped_db_session
+
+    movie = _movie("40003", "tt40003", title="Reset Stream")
+    stream = Stream(_torrent("Reset.Stream.2020", "c" * 40, "Reset Stream"))
+    movie.streams.append(stream)
+    s.add(movie)
+    s.commit()
+
+    assert (
+        s.query(StreamRelation).filter_by(parent_id=movie.id).count() == 1
+    )
+
+    movie.streams.clear()
+    s.commit()
+
+    assert (
+        s.query(StreamRelation).filter_by(parent_id=movie.id).count() == 0
+    )
+
+
+def test_record_processing_failure_marks_failed(test_scoped_db_session):
+    """Repeated commit failures eventually move an item to the Failed state."""
+    s = test_scoped_db_session
+
+    movie = _movie("40004", "tt40004", title="Failing Item")
+    s.add(movie)
+    s.commit()
+    item_id = movie.id
+
+    for _ in range(MAX_PROCESSING_FAILURES - 1):
+        record_processing_failure(item_id, "Updater")
+
+    s.expire_all()
+    item = s.query(MediaItem).filter_by(id=item_id).one()
+    assert item.failed_attempts == MAX_PROCESSING_FAILURES - 1
+    assert item.last_state != States.Failed
+
+    record_processing_failure(item_id, "Updater")
+
+    s.expire_all()
+    item = s.query(MediaItem).filter_by(id=item_id).one()
+    assert item.failed_attempts == MAX_PROCESSING_FAILURES
+    assert item.last_state == States.Failed

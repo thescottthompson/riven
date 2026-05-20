@@ -306,6 +306,54 @@ def create_calendar(session: Session | None = None) -> dict[int, dict[str, Any]]
     return calendar
 
 
+# Number of consecutive commit failures tolerated before an item is marked
+# Failed. This bounds retry loops where a service keeps failing to persist its
+# result (e.g. the Updater hitting a StaleDataError) and retry_library keeps
+# re-queuing the parent show forever.
+MAX_PROCESSING_FAILURES = 10
+
+
+def record_processing_failure(item_id: int, service_name: str) -> None:
+    """
+    Record a failed processing attempt for an item after a commit error.
+
+    Increments the item's failed_attempts counter in its own session. Once the
+    counter reaches MAX_PROCESSING_FAILURES the item is moved to the Failed
+    state so retry_library / process_event stop re-queuing it indefinitely.
+    """
+
+    from program.media.item import MediaItem
+
+    try:
+        with db_session() as session:
+            item = (
+                session.query(MediaItem).filter_by(id=item_id).one_or_none()
+            )
+
+            if not item:
+                return
+
+            item.failed_attempts = (item.failed_attempts or 0) + 1
+
+            if item.failed_attempts >= MAX_PROCESSING_FAILURES:
+                item.store_state(States.Failed)
+                logger.error(
+                    f"{service_name} failed {item.failed_attempts} times for "
+                    f"{item.log_string}; marking Failed to stop retry loop"
+                )
+            else:
+                logger.warning(
+                    f"{service_name} commit failed for {item.log_string} "
+                    f"({item.failed_attempts}/{MAX_PROCESSING_FAILURES})"
+                )
+
+            session.commit()
+    except Exception as e:
+        logger.error(
+            f"Could not record processing failure for item {item_id}: {e}"
+        )
+
+
 def run_thread_with_db_item(
     fn: Callable[..., MediaItemGenerator],
     service: "Service",
@@ -367,7 +415,20 @@ def run_thread_with_db_item(
                             else:
                                 item.store_state()
 
-                            session.commit()
+                            try:
+                                session.commit()
+                            except Exception as commit_error:
+                                session.rollback()
+                                logger.error(
+                                    f"Failed to commit {service.__class__.__name__} "
+                                    f"result for {input_item.log_string}: "
+                                    f"{commit_error}"
+                                )
+                                record_processing_failure(
+                                    event.item_id,
+                                    service.__class__.__name__,
+                                )
+                                raise
 
                         if run_at:
                             return (item.id, run_at)

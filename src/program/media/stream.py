@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy
 from RTN import Torrent
-from sqlalchemy import Index
+from sqlalchemy import Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from program.db.base_model import Base
@@ -26,6 +26,9 @@ class StreamRelation(Base):
     __table_args__ = (
         Index("ix_streamrelation_parent_id", "parent_id"),
         Index("ix_streamrelation_child_id", "child_id"),
+        UniqueConstraint(
+            "parent_id", "child_id", name="uq_streamrelation_parent_child"
+        ),
     )
 
 
@@ -43,6 +46,11 @@ class StreamBlacklistRelation(Base):
     __table_args__ = (
         Index("ix_streamblacklistrelation_media_item_id", "media_item_id"),
         Index("ix_streamblacklistrelation_stream_id", "stream_id"),
+        UniqueConstraint(
+            "media_item_id",
+            "stream_id",
+            name="uq_streamblacklistrelation_item_stream",
+        ),
     )
 
 
