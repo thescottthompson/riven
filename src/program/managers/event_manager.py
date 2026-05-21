@@ -51,6 +51,14 @@ class EventType(Enum):
     Scraped = 4
 
 
+# Services run single-threaded by default — their work is ordered and/or
+# rate-limited against external APIs. Scraping is the throughput bottleneck:
+# its work is independent per item and I/O-bound on external indexers, so it
+# gets a small worker pool. (SmartSession still rate-limits each indexer, so
+# this widens concurrency without hammering them.)
+_SERVICE_MAX_WORKERS = {"Scraping": 4}
+
+
 class EventManager:
     """
     Manages the execution of services and the handling of events.
@@ -84,7 +92,7 @@ class EventManager:
 
         _executor = ThreadPoolExecutor(
             thread_name_prefix=service_name,
-            max_workers=1,
+            max_workers=_SERVICE_MAX_WORKERS.get(service_name, 1),
         )
 
         self._executors.append(
