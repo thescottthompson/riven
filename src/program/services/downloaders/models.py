@@ -27,6 +27,17 @@ ANIME_SPECIALS_PATTERN = regex.compile(
     r"\b(OVA|NCED|NCOP|NC|OVA|ED(\d?v?\d?)|OPv?(\d+)?|SP\d+)\b", regex.IGNORECASE
 )
 
+# Folder/keyword names that mark supplementary content (featurettes, deleted
+# scenes, behind-the-scenes, etc.) rather than real episodes. Used to keep
+# extras from being matched to episode slots when they happen to parse with a
+# plausible episode number.
+EXTRAS_PATTERN = regex.compile(
+    r"\b(?:extras?|featurettes?|behind[\s._-]*the[\s._-]*scenes|bloopers?|"
+    r"outtakes?|gag[\s._-]*reels?|deleted[\s._-]*scenes?|webisodes?|"
+    r"making[\s._-]*of|bonus)\b",
+    regex.IGNORECASE,
+)
+
 VALID_VIDEO_EXTENSIONS = (
     [
         ext
@@ -82,6 +93,7 @@ class DebridFile(BaseModel):
     file_id: int | None
     filename: str
     filesize: int
+    path: str | None = None
     download_url: str | None = None
 
     @classmethod
@@ -134,7 +146,12 @@ class DebridFile(BaseModel):
                     f"Skipping {filetype} file: '{filename}' - filesize: {round(filesize_mb, 2)}MB is outside the allowed range of {min_limit}MB to {max_limit}MB"
                 )
 
-        return cls(filename=filename, filesize=filesize_bytes, file_id=file_id)
+        return cls(
+            filename=filename,
+            filesize=filesize_bytes,
+            file_id=file_id,
+            path=path,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the DebridFile to a dictionary"""
@@ -143,6 +160,7 @@ class DebridFile(BaseModel):
             "filename": self.filename,
             "filesize": self.filesize,
             "file_id": self.file_id,
+            "path": self.path,
             "download_url": self.download_url,
         }
 
