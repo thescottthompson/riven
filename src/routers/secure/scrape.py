@@ -321,28 +321,38 @@ async def resolve_torrent_container(
     if max_filesize_override is not None:
         overrides["max_filesize"] = max_filesize_override
 
-    with settings_manager.override(**overrides):
-        # Try instant availability check first
-        try:
-            container = await asyncio.to_thread(
-                downloader.get_instant_availability, infohash, item_type
-            )
-            if container and container.files:
-                return container, None
-                
-        except InvalidDebridFileException as e:
-            last_error = str(e)
-            logger.debug(f"Invalid debrid file: {e}")
-        except Exception as e:
-            last_error = f"Service error: {str(e)}"
-            logger.debug(f"Error checking instant availability: {e}")
+    # Try each downloader in priority order (Real-Debrid first, then any
+    # fallback like Debrid-Link). A 451/limit/not-cached on the primary must
+    # not dead-end the resolve — a later service may still have the torrent.
+    services = downloader.initialized_services or (
+        [downloader.service] if downloader.service else []
+    )
 
-        # Fallback: probe torrent by adding temporarily
-        if not container or not container.files:
+    with settings_manager.override(**overrides):
+        for service in services:
+            container = None
+
+            # Try instant availability check first
             try:
-                tid = await asyncio.to_thread(downloader.add_torrent, infohash)
+                container = await asyncio.to_thread(
+                    service.get_instant_availability, infohash, item_type
+                )
+                if container and container.files:
+                    return container, None
+
+            except InvalidDebridFileException as e:
+                last_error = str(e)
+                logger.debug(f"{service.key}: invalid debrid file: {e}")
+            except Exception as e:
+                last_error = f"{service.key}: {str(e)}"
+                logger.debug(f"{service.key}: error checking instant availability: {e}")
+
+            # Fallback: probe torrent by adding temporarily on this service
+            if not container or not container.files:
+                tid = None
                 try:
-                    info = await asyncio.to_thread(downloader.get_torrent_info, tid)
+                    tid = await asyncio.to_thread(service.add_torrent, infohash)
+                    info = await asyncio.to_thread(service.get_torrent_info, tid)
                     if info and info.files:
                         valid_files = list[DebridFile]()
                         for f in info.files.values():
@@ -369,18 +379,20 @@ async def resolve_torrent_container(
                         else:
                             last_error = "No valid video files found (all files filtered by type or size)"
                 except Exception as e:
-                    logger.error(f"Error getting torrent info: {e}")
-                    last_error = f"Unable to get torrent info: {str(e)}"
+                    last_error = f"{service.key}: unable to resolve magnet: {str(e)}"
+                    logger.debug(f"{service.key}: magnet resolution error: {e}")
                 finally:
-                    # Clean up temporary torrent if we're just probing
-                    if not container or not container.files:
+                    # Clean up the temp torrent unless this service produced a
+                    # usable container (which carries the torrent_id forward).
+                    if tid is not None and (not container or not container.files):
                         try:
-                            await asyncio.to_thread(downloader.delete_torrent, tid)
+                            await asyncio.to_thread(service.delete_torrent, tid)
                         except Exception:
                             pass
-            except Exception as e:
-                logger.error(f"Magnet resolution error: {e}")
-                return None, f"Unable to resolve magnet: {str(e)}"
+
+            if container and container.files:
+                return container, None
+            # otherwise fall through to the next service
 
     if container and container.files:
         return container, None
