@@ -17,6 +17,7 @@ from program.media.models import ActiveStream, MediaMetadata
 from program.services.downloaders.models import (
     DebridFile,
     DownloadedTorrent,
+    EXTRAS_PATTERN,
     NoMatchingFilesException,
     NotCachedException,
     TorrentContainer,
@@ -35,6 +36,30 @@ from program.core.runner import MediaItemGenerator, Runner, RunnerResult
 from .realdebrid import RealDebridDownloader
 from .debridlink import DebridLinkDownloader
 from .alldebrid import AllDebridDownloader
+
+
+def _is_extras_file(file_data: ParsedData, path: str | None) -> bool:
+    """
+    Return True if a container file is supplementary content (featurettes,
+    deleted scenes, behind-the-scenes, bloopers, etc.) rather than a real
+    episode.
+
+    RTN flags many extras from the filename via `trash`/`extras`, but misses
+    ones that parse to a plausible episode number (e.g. "Behind The Scenes
+    E02"). Those are caught by matching an extras-named folder in the file's
+    path. The first path segment is skipped so a show literally titled
+    "Extras" is not filtered out.
+    """
+
+    if file_data.trash or file_data.extras:
+        return True
+
+    if not path:
+        return False
+
+    segments = [s for s in path.replace("\\", "/").split("/") if s]
+
+    return any(EXTRAS_PATTERN.search(segment) for segment in segments[1:-1])
 
 
 class Downloader(Runner[None, DownloaderBase]):
@@ -368,6 +393,11 @@ class Downloader(Runner[None, DownloaderBase]):
                     continue
 
                 if isinstance(item, (Show, Season, Episode)):
+                    if _is_extras_file(file_data, file.path):
+                        logger.debug(
+                            f"Skipping extras file '{file.filename}'"
+                        )
+                        continue
                     if not file_data.episodes:
                         continue
                     elif 0 in file_data.episodes and len(file_data.episodes) == 1:
