@@ -38,7 +38,19 @@ class AsyncClient(httpx.AsyncClient):
             self.event_hooks["response"].append(self.log_response)
 
     async def raise_on_4xx_5xx(self, response: httpx.Response) -> None:
-        """Raise an error if the response status code indicates an error."""
+        """Raise an error if the response status code indicates an error.
+
+        Skips 3xx redirects. This hook fires on every response, including the
+        intermediate redirect responses httpx surfaces while resolving
+        ``follow_redirects=True``. ``raise_for_status()`` raises on 3xx as well
+        as 4xx/5xx, so calling it here would abort a redirect before httpx
+        could follow it — which breaks redirect-based download URLs such as
+        Debrid-Link's 302 to a ``seedNN.debrid.link`` host, making every
+        Debrid-Link file unplayable through the VFS.
+        """
+
+        if response.is_redirect:
+            return
 
         response.raise_for_status()
 
