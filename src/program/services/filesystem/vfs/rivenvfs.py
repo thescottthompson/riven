@@ -120,6 +120,11 @@ class RivenVFS(pyfuse3.Operations):
     removing, and managing virtual files and directories.
     """
 
+    # Fixed epoch (2020-01-01T00:00:00Z, in nanoseconds) used for directory
+    # mtimes. Constant across restarts so Plex does not see directories as
+    # modified and re-analyze the whole library every time Riven restarts.
+    STABLE_DIR_MTIME_NS = 1_577_836_800_000_000_000
+
     def __init__(self, mountpoint: str, downloader: Downloader) -> None:
         """
         Initialize the Riven Virtual File System.
@@ -138,7 +143,13 @@ class RivenVFS(pyfuse3.Operations):
         # getattr() makes every directory appear "just modified" to clients,
         # which triggers Plex's "directory changed" check on every metadata
         # request and causes a runaway refresh loop while users browse.
-        self._mount_time_ns = self._current_time_ns()
+        #
+        # This MUST be a fixed constant rather than the process start time: using
+        # the start time keeps directory mtimes stable within a single run but
+        # advances them on every restart, so each Riven restart makes Plex see
+        # every directory as modified and re-analyze the entire library over the
+        # VFS. A constant epoch keeps directory mtimes identical across restarts.
+        self._mount_time_ns = self.STABLE_DIR_MTIME_NS
 
         # Initialize VFS cache from settings
         self.fs = settings_manager.settings.filesystem
